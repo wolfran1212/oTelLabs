@@ -57,7 +57,7 @@ spec:
             - containerPort: 4318   # OTLP HTTP
               name: otlp-http
             - containerPort: 8888   # Métricas internas
-              name: metrics-internal
+              name: otel-metrics
             - containerPort: 8889   # Prometheus endpoint
               name: metrics-prom
             - containerPort: 13133  # Health check
@@ -88,18 +88,18 @@ spec:
           volumeMounts:
             - name: collector-config
               mountPath: /conf
-          livenessProbe:
-            httpGet:
-              path: /
-              port: 13133
-            initialDelaySeconds: 10
-            periodSeconds: 30
-          readinessProbe:
-            httpGet:
-              path: /
-              port: 13133
-            initialDelaySeconds: 5
-            periodSeconds: 10
+          # livenessProbe:
+          #   httpGet:
+          #     path: /
+          #     port: 13133
+          #   initialDelaySeconds: 10
+          #   periodSeconds: 30
+          # readinessProbe:
+          #   httpGet:
+          #     path: /
+          #     port: 13133
+          #   initialDelaySeconds: 5
+          #   periodSeconds: 10
       volumes:
         - name: collector-config
           configMap:
@@ -155,7 +155,7 @@ spec:
     spec:
       containers:
         - name: service-a
-          image: gcr.io/${GCP_PROJECT}/service-a:1.0.0
+          image: gcr.io/otellabs/service-a:1.0.0
           ports:
             - containerPort: 8000
               name: http
@@ -176,18 +176,18 @@ spec:
             limits:
               cpu:    500m
               memory: 512Mi
-          livenessProbe:
-            httpGet:
-              path: /health
-              port: 8000
-            initialDelaySeconds: 15
-            periodSeconds: 20
-          readinessProbe:
-            httpGet:
-              path: /health
-              port: 8000
-            initialDelaySeconds: 5
-            periodSeconds: 10
+          # livenessProbe:
+          #   httpGet:
+          #     path: /health
+          #     port: 8000
+          #   initialDelaySeconds: 15
+          #   periodSeconds: 20
+          # readinessProbe:
+          #   httpGet:
+          #     path: /health
+          #     port: 8000
+          #   initialDelaySeconds: 5
+          #   periodSeconds: 10
 
 ---
 # service-a Service
@@ -234,7 +234,7 @@ spec:
     spec:
       containers:
         - name: service-b
-          image: gcr.io/${GCP_PROJECT}/service-b:1.0.0
+          image: gcr.io/otellabs/service-b:1.0.0
           ports:
             - containerPort: 8001
               name: http
@@ -253,12 +253,12 @@ spec:
             limits:
               cpu:    500m
               memory: 512Mi
-          livenessProbe:
-            httpGet:
-              path: /health
-              port: 8001
-            initialDelaySeconds: 15
-            periodSeconds: 20
+          # livenessProbe:
+          #   httpGet:
+          #     path: /health
+          #     port: 8001
+          #   initialDelaySeconds: 15
+          #   periodSeconds: 20
 
 ---
 # service-b Service (ClusterIP — solo interno)
@@ -346,3 +346,4 @@ spec:
         target:
           type: Utilization
           averageUtilization: 70
+
