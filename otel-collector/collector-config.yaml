@@ -1,0 +1,229 @@
+# ════════════════════════════════════════════════════════════════════════════
+# OTel Collector — Pipeline completo de observabilidad
+#
+# Flujo de datos:
+#   Apps (service-a, service-b)
+#     └─→ OTLP gRPC (:4317) / HTTP (:4318)
+#         └─→ [Processors: batch → memory_limiter → resource → filter]
+#             ├─→ Jaeger (:14250) — trazas distribuidas
+#             ├─→ Prometheus (:8889) — métricas con scraping
+#             └─→ Cloud Logging / CloudWatch — logs JSON con trace_id
+# ════════════════════════════════════════════════════════════════════════════
+
+extensions:
+  health_check:
+    endpoint: 0.0.0.0:13133
+  pprof:
+    endpoint: 0.0.0.0:1777
+  zpages:
+    endpoint: 0.0.0.0:55679
+
+receivers:
+  # ── OTLP: protocolo nativo de OTel SDK ─────────────────────────────────────
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+        max_recv_msg_size_mib: 32
+        keepalive:
+          server_parameters:
+            max_connection_idle: 11s
+            max_connection_age: 12s
+            time: 30s
+            timeout: 20s
+      http:
+        endpoint: 0.0.0.0:4318
+        cors:
+          allowed_origins: ["*"]
+
+  # ── Prometheus: scraping de los endpoints /metrics de las apps ─────────────
+  prometheus:
+    config:
+      global:
+        scrape_interval: 15s
+      scrape_configs:
+        - job_name: otel-collector
+          static_configs:
+            - targets: ["localhost:8888"]
+   #las métricas de las apps llegan al Collector por OTLP push (cada 15 segundos desde el PeriodicExportingMetricReader) — el scraping directo es redundante
+
+  # ── Hostmetrics: métricas de CPU/memoria del host del Collector ─────────────
+  hostmetrics:
+    collection_interval: 30s
+    scrapers:
+      cpu:
+        metrics:
+          system.cpu.utilization:
+            enabled: true
+      memory:
+      disk:
+      network:
+
+processors:
+  # ── batch: agrupa señales → reduce conexiones de red al backend ───────────
+  batch:
+    timeout: 5s
+    send_batch_size: 1024
+    send_batch_max_size: 2048
+
+  # ── memory_limiter: evita OOM del Collector bajo carga alta ───────────────
+  memory_limiter:
+    check_interval: 0.5s
+    limit_mib: 400        # Si supera 400 MB → empieza a rechazar datos
+    spike_limit_mib: 100  # Margen para spikes de corta duración
+
+  # ── resource: enriquece TODAS las señales con atributos del entorno ────────
+  resource:
+    attributes:
+      - action: insert
+        key: deployment.environment
+        value: ${env:ENVIRONMENT}
+      - action: insert
+        key: cloud.region
+        value: ${env:CLOUD_REGION}
+      - action: insert
+        key: collector.version
+        value: "0.103.0"
+
+
+  # ── resourcedetection: detecta automáticamente atributos GCP/AWS ─────────
+  resourcedetection:
+    detectors: [env, gcp, ecs, docker, system]
+    timeout: 10s
+    override: false
+
+  # ── filter: excluye health checks del pipeline de trazas ─────────────────
+  filter/health:
+    error_mode: ignore
+    traces:
+      span:
+        - 'attributes["http.target"] == "/health"'
+        - 'attributes["http.route"] == "/health"'
+
+  # ── attributes: normaliza atributos antes de exportar ─────────────────────
+  attributes/metrics:
+    actions:
+      - action: delete
+        key: http.flavor           # Reduce cardinalidad en Prometheus
+      - action: insert
+        key: service.namespace
+        value: "observability-lab"
+
+  # ── tail_sampling: muestrea trazas por política (reducir costos) ───────────
+  # Solo activo si el volumen de trazas supera el budget.
+  # tail_sampling:
+  #   decision_wait: 10s
+  #   policies:
+  #     - name: errors-policy
+  #       type: status_code
+  #       status_code: { status_codes: [ERROR] }
+  #     - name: slow-traces
+  #       type: latency
+  #       latency: { threshold_ms: 1000 }
+  #     - name: probabilistic-sample
+  #       type: probabilistic
+  #       probabilistic: { sampling_percentage: 10 }
+
+exporters:
+  otlp/jaeger:
+    endpoint: jaeger:4317
+    tls:
+      insecure: true
+
+  # ── Tempo: trazas distribuidas (alternativa Grafana) ─────────────────────
+  otlp/tempo:
+    endpoint: tempo:4317
+    tls:
+      insecure: true
+
+  # ── Prometheus: métricas con endpoint scraping ─────────────────────────────
+  prometheus:
+    endpoint: "0.0.0.0:8889"
+    namespace: otelcol
+    send_timestamps: true
+    metric_expiration: 3m
+    resource_to_telemetry_conversion:
+      enabled: false   # Convierte resource attrs en labels de Prometheus
+
+  # ── OTLP hacia Prometheus remoto (GCP Managed Prometheus) ────────────────
+  # prometheusremotewrite:
+  #   endpoint: "https://monitoring.googleapis.com/v1/projects/${GCP_PROJECT}/location/global/prometheus/api/v1/write"
+  #   auth:
+  #     authenticator: googleauth
+
+  # ── Cloud Logging (GCP) ───────────────────────────────────────────────────
+  googlecloud:
+    project: ${env:GCP_PROJECT_ID}
+    log:
+      default_log_name: "otel-lab"
+    metric:
+      prefix: "custom.googleapis.com/otel/"
+    trace:
+      endpoint: cloudtrace.googleapis.com
+
+  # ── CloudWatch (AWS) ──────────────────────────────────────────────────────
+  # awscloudwatchlogs:
+  #   log_group_name: "/otel-lab/services"
+  #   log_stream_name: "otel-collector"
+  #   region: ${env:AWS_REGION}
+  #   raw_log: false
+
+  # ── Logging local (desarrollo/debug) ──────────────────────────────────────
+  logging:
+    verbosity: normal
+    sampling_initial: 5
+    sampling_thereafter: 200
+
+  # ── Debug: imprime todo en stdout (solo desarrollo) ───────────────────────
+  debug:
+    verbosity: detailed
+
+service:
+  extensions: [health_check, pprof, zpages]
+
+  pipelines:
+    # ── Pipeline de TRAZAS ───────────────────────────────────────────────────
+    traces:
+      receivers: [otlp]
+      processors:
+        - memory_limiter
+        - resource
+        - resourcedetection
+        - filter/health     # Excluir health checks
+        - batch
+      exporters:
+        - otlp/jaeger            # Jaeger UI para visualización
+        - otlp/tempo        # Tempo (Grafana stack)
+        - logging
+
+    # ── Pipeline de MÉTRICAS ─────────────────────────────────────────────────
+    metrics:
+      receivers: [otlp, prometheus, hostmetrics]
+      processors:
+        - memory_limiter
+        - resource
+        - resourcedetection
+        - attributes/metrics
+        - batch
+      exporters:
+        - prometheus        # Endpoint scraping :8889/metrics
+        - logging
+
+    # ── Pipeline de LOGS ─────────────────────────────────────────────────────
+    logs:
+      receivers: [otlp]
+      processors:
+        - memory_limiter
+        - resource
+        - batch
+      exporters:
+        - googlecloud       # Cloud Logging (GCP)
+        # - awscloudwatchlogs # CloudWatch (AWS)
+        - logging
+
+  telemetry:
+    logs:
+      level: info
+    metrics:
+      address: 0.0.0.0:8888   # Métricas internas del Collector
+      level: detailed

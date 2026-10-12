@@ -1,0 +1,281 @@
+{
+  "title": "OTel Lab — Pipeline de Observabilidad End-to-End",
+  "uid": "otel-lab-main",
+  "tags": ["otel", "sre", "lab"],
+  "timezone": "browser",
+  "schemaVersion": 38,
+  "refresh": "30s",
+  "time": { "from": "now-1h", "to": "now" },
+  "templating": {
+    "list": [
+      {
+        "name": "service",
+        "type": "query",
+        "datasource": "Prometheus",
+        "query": "label_values(otelcol_http_requests_total, service_name)",
+        "multi": true,
+        "includeAll": true,
+        "current": { "text": "All", "value": "$__all" }
+      },
+      {
+      "name": "interval",
+      "type": "interval",
+      "query": "1m,5m,10m,30m,1h",
+      "current": {
+        "selected": false,
+        "text": "5m",
+        "value": "5m"
+      },
+      "auto": false,
+      "refresh": 2,
+      "label": "Intervalo"
+      }
+    ]
+  },
+  "panels": [
+    {
+      "id": 1,
+      "title": "SLI-1: Tasa de Disponibilidad (% requests exitosos)",
+      "description": "SLI de disponibilidad: requests 2xx / total requests. SLO objetivo: ≥ 99.5%",
+      "type": "gauge",
+      "gridPos": { "x": 0, "y": 0, "w": 6, "h": 8 },
+      "datasource": "Prometheus",
+      "targets": [
+        {
+          "expr": "100 * (\n  sum(rate(otelcol_http_requests_total{status=~'2..', service_name=~'$service'}[$interval]))\n  /\n  sum(rate(otelcol_http_requests_total{service_name=~'$service'}[$interval]))\n)",
+          "legendFormat": "Disponibilidad %",
+          "instant": true
+        }
+      ],
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"] },
+        "orientation": "auto",
+        "showThresholdLabels": true,
+        "showThresholdMarkers": true
+      },
+      "fieldConfig": {
+        "defaults": {
+          "min": 95, "max": 100,
+          "unit": "percent",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "red",    "value": 0    },
+              { "color": "yellow", "value": 99   },
+              { "color": "green",  "value": 99.5 }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "id": 2,
+      "title": "SLI-2: Latencia p50 / p95 / p99 (segundos)",
+      "description": "Distribución de latencia HTTP. SLO objetivo: p95 < 500ms",
+      "type": "timeseries",
+      "gridPos": { "x": 6, "y": 0, "w": 9, "h": 8 },
+      "datasource": "Prometheus",
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.50, sum(rate(otelcol_http_request_duration_seconds_bucket{service_name=~'$service'}[$interval])) by (le, service_name))",
+          "legendFormat": "p50 — {{service_name}}"
+        },
+        {
+          "expr": "histogram_quantile(0.95, sum(rate(otelcol_http_request_duration_seconds_bucket{service_name=~'$service'}[$interval])) by (le, service_name))",
+          "legendFormat": "p95 — {{service_name}}"
+        },
+        {
+          "expr": "histogram_quantile(0.99, sum(rate(otelcol_http_request_duration_seconds_bucket{service_name=~'$service'}[$interval])) by (le, service_name))",
+          "legendFormat": "p99 — {{service_name}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "custom": { "lineWidth": 2 },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green",  "value": 0    },
+              { "color": "yellow", "value": 0.3  },
+              { "color": "red",    "value": 0.5  }
+            ]
+          }
+        }
+      },
+      "options": {
+        "tooltip": { "mode": "multi" },
+        "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["last", "max"] }
+      }
+    },
+    {
+      "id": 3,
+      "title": "SLI-3: Error Rate (tasa de errores 5xx)",
+      "description": "SLI de error rate. SLO objetivo: ≤ 0.5%. Burn rate = error_rate / 0.005",
+      "type": "timeseries",
+      "gridPos": { "x": 15, "y": 0, "w": 9, "h": 8 },
+      "datasource": "Prometheus",
+      "targets": [
+        {
+          "expr": "100 * sum(rate(otelcol_http_requests_total{status=~'5..', service_name=~'$service'}[$interval])) by (service_name)\n  /\nsum(rate(otelcol_http_requests_total{service_name=~'$service'}[$interval])) by (service_name)",
+          "legendFormat": "Error Rate % — {{service_name}}"
+        },
+        {
+          "expr": "0.5",
+          "legendFormat": "SLO threshold (0.5%)"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green",  "value": 0   },
+              { "color": "yellow", "value": 0.3 },
+              { "color": "red",    "value": 0.5 }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "id": 4,
+      "title": "SLI-4: Throughput (RPS — Requests Per Second)",
+      "description": "Tráfico total hacia los microservicios. Un drop súbito indica incidente.",
+      "type": "timeseries",
+      "gridPos": { "x": 0, "y": 8, "w": 8, "h": 7 },
+      "datasource": "Prometheus",
+      "targets": [
+        {
+          "expr": "sum(rate(otelcol_http_requests_total{service_name=~'$service'}[$interval])) by (service_name)",
+          "legendFormat": "RPS — {{service_name}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "reqps" }
+      }
+    },
+    {
+      "id": 5,
+      "title": "CPU Overhead — Comparativa con/sin OTel",
+      "description": "Uso de CPU de los servicios instrumentados. Ver Fase 4 para comparativa baseline.",
+      "type": "timeseries",
+      "gridPos": { "x": 8, "y": 8, "w": 8, "h": 7 },
+      "datasource": "Prometheus",
+      "targets": [
+        {
+          "expr": "rate(process_cpu_seconds_total{service_name=~'$service'}[$interval]) * 100",
+          "legendFormat": "CPU % — {{service_name}}"
+        },
+        {
+          "expr": "rate(otelcol_process_cpu_seconds{} [$interval]) * 100",
+          "legendFormat": "CPU % — OTel Collector"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "percent" }
+      }
+    },
+    {
+      "id": 6,
+      "title": "OTel Collector — Spans enviados / rechazados / en cola",
+      "description": "Salud del pipeline del Collector. Spans rechazados = señal de sobrecarga o error de red al backend.",
+      "type": "timeseries",
+      "gridPos": { "x": 16, "y": 8, "w": 8, "h": 7 },
+      "datasource": "Prometheus",
+      "targets": [
+        {
+          "expr": "rate(otelcol_otelcol_exporter_sent_spans_total[5m])",
+          "legendFormat": "Spans enviados/s — {{exporter}}"
+        },
+        {
+          "expr": "rate(otelcol_exporter_enqueue_failed_spans_total[5m])",
+          "legendFormat": "⚠️ Spans rechazados/s — {{exporter}}"
+        },
+        {
+          "expr": "otelcol_exporter_queue_size",
+          "legendFormat": "Cola de spans — {{exporter}}"
+        },
+        {
+          "expr": "rate(otelcol_processor_dropped_spans_total[5m])",
+          "legendFormat": "🔴 Spans descartados — memory_limiter"
+        }
+      ],
+      "fieldConfig": {
+        "overrides": [
+          {
+            "matcher": { "id": "byRegexp", "options": ".*rechazados.*|.*descartados.*" },
+            "properties": [
+              { "id": "color", "value": { "mode": "fixed", "fixedColor": "red" } }
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": 7,
+      "title": "Burn Rate — Velocidad de consumo del Error Budget",
+      "description": "Burn Rate = error_rate_actual / error_rate_SLO (SLO=99.5% → error_rate_SLO=0.005). BR > 14.4 en 1h → alerta PAGE.",
+      "type": "stat",
+      "gridPos": { "x": 0, "y": 15, "w": 6, "h": 5 },
+      "datasource": "Prometheus",
+      "targets": [
+        {
+          "expr": "(\n  sum(rate(otelcol_http_requests_total{status=~'5..', service_name=~'$service'}[1h]))\n  /\n  sum(rate(otelcol_http_requests_total{service_name=~'$service'}[1h]))\n) / 0.005",
+          "legendFormat": "Burn Rate 1h",
+          "instant": true
+        }
+      ],
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"] },
+        "colorMode": "background",
+        "graphMode": "none",
+        "textMode": "value_and_name"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "decimals": 2,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green",  "value": 0    },
+              { "color": "yellow", "value": 6    },
+              { "color": "red",    "value": 14.4 }
+            ]
+          }
+        }
+      }
+    },
+  {
+      "id": 8,
+      "title": "Propagación W3C TraceContext — Trazas cross-service",
+      "description": "Requests por servicio y método. Si service-a y service-b aparecen → propagación correcta.",
+      "type": "table",
+      "gridPos": { "x": 6, "y": 15, "w": 18, "h": 5 },
+      "datasource": "Prometheus",
+      "targets": [
+        {
+          "expr": "rate(otelcol_service_b_calls_total[5m])",
+          "legendFormat": "Llamadas a service-b — {{status}}",  
+          "instant": true,
+          "format": "table"
+        }
+      ],
+      "transformations": [
+        {
+          "id": "organize",
+          "options": {
+            "renameByName": {
+              "job":    "Servicio",
+              "method": "Método",
+              "status": "Status",
+              "Value":  "Req/s"
+            }
+          }
+        }
+      ]
+    }   
+  ]
+}

@@ -1,0 +1,46 @@
+apiVersion: 1
+
+datasources:
+  - name: Prometheus
+    type: prometheus
+    access: proxy
+    url: http://prometheus:9090
+    isDefault: true
+    jsonData:
+      exemplarTraceIdDestinations:
+        # Correlación Prometheus exemplar → Jaeger trace
+        - name: trace_id
+          datasourceUid: jaeger
+          urlDisplayLabel: "Ver traza en Jaeger"
+
+  - name: Jaeger
+    type: jaeger
+    access: proxy
+    url: http://jaeger:16686
+    uid: jaeger
+    jsonData:
+      tracesToLogsV2:
+        datasourceUid: loki
+        spanStartTimeShift: "-1m"
+        spanEndTimeShift:   "1m"
+        customQuery: true
+        query: '{service="${__span.tags.service.name}"} | json | trace_id="${__span.traceId}"'
+      nodeGraph:
+        enabled: true
+      serviceMap:
+        datasourceUid: prometheus
+
+  - name: Tempo
+    type: tempo
+    access: proxy
+    url: http://tempo:3200
+    uid: tempo
+    jsonData:
+      tracesToMetrics:
+        datasourceUid: Prometheus
+        tags: [{ key: "service.name", value: "service" }]
+        queries:
+          - name: "Request rate"
+            query: "rate(http_requests_total{service=\"$__tags.service\"}[5m])"
+      nodeGraph:
+        enabled: true

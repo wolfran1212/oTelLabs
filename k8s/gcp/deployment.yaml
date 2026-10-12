@@ -1,0 +1,348 @@
+# ════════════════════════════════════════════════════════════════════════════
+# k8s/gcp/deployment.yaml — Manifiestos GKE para el laboratorio OTel
+#
+# Pre-requisitos:
+#   gcloud container clusters create otel-lab --region=us-central1 --num-nodes=3
+#   kubectl create namespace otel-lab
+#   kubectl config set-context --current --namespace=otel-lab
+#
+# Aplicar:
+#   kubectl apply -f k8s/gcp/
+# ════════════════════════════════════════════════════════════════════════════
+
+---
+# ConfigMap — Variables compartidas del entorno
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: otel-lab-config
+  namespace: otel-lab
+data:
+  ENVIRONMENT:     production
+  CLOUD_PROVIDER:  gcp
+  CLOUD_REGION:    us-central1
+  OTEL_EXPORTER_OTLP_ENDPOINT: "http://otel-collector-svc:4317"
+  DATABASE_URL:    "postgresql://app:secret@postgres-svc:5432/appdb"
+
+---
+# OTel Collector — DaemonSet (un agente por nodo GKE)
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: otel-collector
+  namespace: otel-lab
+  labels:
+    app: otel-collector
+    component: observability
+spec:
+  selector:
+    matchLabels:
+      app: otel-collector
+  template:
+    metadata:
+      labels:
+        app: otel-collector
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port:   "8888"
+    spec:
+      serviceAccountName: otel-collector-sa  # Para acceso a Cloud Logging / Cloud Trace
+      containers:
+        - name: otel-collector
+          image: otel/opentelemetry-collector-contrib:0.103.0
+          args: ["--config=/conf/collector-config.yaml"]
+          ports:
+            - containerPort: 4317   # OTLP gRPC
+              name: otlp-grpc
+            - containerPort: 4318   # OTLP HTTP
+              name: otlp-http
+            - containerPort: 8888   # Métricas internas
+              name: metrics-internal
+            - containerPort: 8889   # Prometheus endpoint
+              name: metrics-prom
+            - containerPort: 13133  # Health check
+              name: health
+          resources:
+            requests:
+              cpu:    100m
+              memory: 200Mi
+            limits:
+              cpu:    500m
+              memory: 500Mi   # Debe ser mayor que memory_limiter.limit_mib
+          env:
+            - name: ENVIRONMENT
+              valueFrom:
+                configMapKeyRef:
+                  name: otel-lab-config
+                  key: ENVIRONMENT
+            - name: CLOUD_REGION
+              valueFrom:
+                configMapKeyRef:
+                  name: otel-lab-config
+                  key: CLOUD_REGION
+            - name: GCP_PROJECT_ID
+              valueFrom:
+                secretKeyRef:
+                  name: gcp-credentials
+                  key: project_id
+          volumeMounts:
+            - name: collector-config
+              mountPath: /conf
+          livenessProbe:
+            httpGet:
+              path: /
+              port: 13133
+            initialDelaySeconds: 10
+            periodSeconds: 30
+          readinessProbe:
+            httpGet:
+              path: /
+              port: 13133
+            initialDelaySeconds: 5
+            periodSeconds: 10
+      volumes:
+        - name: collector-config
+          configMap:
+            name: collector-config
+
+---
+# Service para el OTel Collector (ClusterIP — solo acceso interno)
+apiVersion: v1
+kind: Service
+metadata:
+  name: otel-collector-svc
+  namespace: otel-lab
+  labels:
+    app: otel-collector
+spec:
+  selector:
+    app: otel-collector
+  ports:
+    - name: otlp-grpc
+      port: 4317
+      targetPort: 4317
+    - name: otlp-http
+      port: 4318
+      targetPort: 4318
+    - name: metrics
+      port: 8889
+      targetPort: 8889
+
+---
+# service-a Deployment
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: service-a
+  namespace: otel-lab
+  labels:
+    app: service-a
+    version: "1.0.0"
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: service-a
+  template:
+    metadata:
+      labels:
+        app: service-a
+        version: "1.0.0"
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port:   "9090"
+        prometheus.io/path:   "/metrics"
+    spec:
+      containers:
+        - name: service-a
+          image: gcr.io/${GCP_PROJECT}/service-a:1.0.0
+          ports:
+            - containerPort: 8000
+              name: http
+            - containerPort: 9090
+              name: metrics
+          envFrom:
+            - configMapRef:
+                name: otel-lab-config
+          env:
+            - name: SERVICE_B_URL
+              value: "http://service-b-svc:8001"
+            - name: PROMETHEUS_PORT
+              value: "9090"
+          resources:
+            requests:
+              cpu:    100m
+              memory: 128Mi
+            limits:
+              cpu:    500m
+              memory: 512Mi
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 15
+            periodSeconds: 20
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 5
+            periodSeconds: 10
+
+---
+# service-a Service
+apiVersion: v1
+kind: Service
+metadata:
+  name: service-a-svc
+  namespace: otel-lab
+spec:
+  selector:
+    app: service-a
+  ports:
+    - name: http
+      port: 8000
+      targetPort: 8000
+    - name: metrics
+      port: 9090
+      targetPort: 9090
+  type: LoadBalancer  # Expone service-a externamente en GKE
+
+---
+# service-b Deployment
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: service-b
+  namespace: otel-lab
+  labels:
+    app: service-b
+    version: "1.0.0"
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: service-b
+  template:
+    metadata:
+      labels:
+        app: service-b
+        version: "1.0.0"
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port:   "9091"
+    spec:
+      containers:
+        - name: service-b
+          image: gcr.io/${GCP_PROJECT}/service-b:1.0.0
+          ports:
+            - containerPort: 8001
+              name: http
+            - containerPort: 9091
+              name: metrics
+          envFrom:
+            - configMapRef:
+                name: otel-lab-config
+          env:
+            - name: PROMETHEUS_PORT
+              value: "9091"
+          resources:
+            requests:
+              cpu:    100m
+              memory: 128Mi
+            limits:
+              cpu:    500m
+              memory: 512Mi
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8001
+            initialDelaySeconds: 15
+            periodSeconds: 20
+
+---
+# service-b Service (ClusterIP — solo interno)
+apiVersion: v1
+kind: Service
+metadata:
+  name: service-b-svc
+  namespace: otel-lab
+spec:
+  selector:
+    app: service-b
+  ports:
+    - name: http
+      port: 8001
+      targetPort: 8001
+    - name: metrics
+      port: 9091
+      targetPort: 9091
+  type: ClusterIP
+
+---
+# Jaeger Deployment (trazas distribuidas)
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: jaeger
+  namespace: otel-lab
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: jaeger
+  template:
+    metadata:
+      labels:
+        app: jaeger
+    spec:
+      containers:
+        - name: jaeger
+          image: jaegertracing/all-in-one:1.58
+          ports:
+            - containerPort: 16686   # UI
+            - containerPort: 14250   # gRPC
+          env:
+            - name: COLLECTOR_OTLP_ENABLED
+              value: "true"
+
+---
+# Jaeger Service
+apiVersion: v1
+kind: Service
+metadata:
+  name: jaeger-svc
+  namespace: otel-lab
+spec:
+  selector:
+    app: jaeger
+  ports:
+    - name: ui
+      port: 16686
+      targetPort: 16686
+    - name: grpc
+      port: 14250
+      targetPort: 14250
+  type: LoadBalancer  # Expone Jaeger UI externamente
+
+---
+# HorizontalPodAutoscaler — service-a
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: service-a-hpa
+  namespace: otel-lab
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: service-a
+  minReplicas: 2
+  maxReplicas: 10
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 70

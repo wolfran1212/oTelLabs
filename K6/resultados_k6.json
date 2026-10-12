@@ -1,0 +1,20 @@
+{
+  "modo": "errores",
+  "timestamp": "2026-08-21T08:13:34.833Z",
+  "duracion_s": 120.6848362,
+  "metricas": {
+    "total_requests": 3837,
+    "rps": 31.793555187341752,
+    "latencia_avg": 59.447955694553,
+    "latencia_p95": 189.3158,
+    "latencia_p99": 285.2469479999998,
+    "error_rate_pct": 47.51107636174095,
+    "tasa_exito_pct": 100,
+    "burn_rate": 95.02
+  },
+  "slos": {
+    "latencia_p95_ok": true,
+    "error_rate_ok": false,
+    "burn_rate_ok": false
+  }
+}

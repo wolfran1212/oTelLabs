@@ -1,0 +1,138 @@
+{
+  "comment": "AWS ECS Fargate — Task Definition para el laboratorio OTel",
+  "family": "otel-lab",
+  "networkMode": "awsvpc",
+  "requiresCompatibilities": ["FARGATE"],
+  "cpu": "1024",
+  "memory": "2048",
+  "executionRoleArn": "arn:aws:iam::ACCOUNT_ID:role/ecsTaskExecutionRole",
+  "taskRoleArn":      "arn:aws:iam::ACCOUNT_ID:role/ecsTaskRole",
+
+  "containerDefinitions": [
+    {
+      "name": "otel-collector",
+      "image": "public.ecr.aws/aws-observability/aws-otel-collector:latest",
+      "essential": true,
+      "command": ["--config=/etc/otel/collector-config.yaml"],
+      "cpu": 256,
+      "memory": 512,
+      "portMappings": [
+        { "containerPort": 4317, "protocol": "tcp", "name": "otlp-grpc" },
+        { "containerPort": 4318, "protocol": "tcp", "name": "otlp-http" },
+        { "containerPort": 8889, "protocol": "tcp", "name": "metrics"   },
+        { "containerPort": 13133,"protocol": "tcp", "name": "health"    }
+      ],
+      "mountPoints": [
+        {
+          "sourceVolume": "otel-config",
+          "containerPath": "/etc/otel",
+          "readOnly": true
+        }
+      ],
+      "environment": [
+        { "name": "ENVIRONMENT",  "value": "production" },
+        { "name": "CLOUD_REGION", "value": "us-east-1" }
+      ],
+      "secrets": [
+        { "name": "AWS_REGION", "valueFrom": "arn:aws:ssm:us-east-1:ACCOUNT:parameter/otel-lab/aws-region" }
+      ],
+      "logConfiguration": {
+        "logDriver": "awslogs",
+        "options": {
+          "awslogs-group":         "/otel-lab/collector",
+          "awslogs-region":        "us-east-1",
+          "awslogs-stream-prefix": "otel-collector"
+        }
+      },
+      "healthCheck": {
+        "command": ["CMD-SHELL", "curl -f http://localhost:13133/ || exit 1"],
+        "interval": 30,
+        "timeout":  5,
+        "retries":  3,
+        "startPeriod": 15
+      }
+    },
+
+    {
+      "name": "service-a",
+      "image": "ACCOUNT_ID.dkr.ecr.us-east-1.amazonaws.com/otel-lab/service-a:1.0.0",
+      "essential": true,
+      "cpu": 256,
+      "memory": 512,
+      "portMappings": [
+        { "containerPort": 8000, "protocol": "tcp", "name": "http"    },
+        { "containerPort": 9090, "protocol": "tcp", "name": "metrics" }
+      ],
+      "environment": [
+        { "name": "OTEL_EXPORTER_OTLP_ENDPOINT", "value": "http://localhost:4317" },
+        { "name": "ENVIRONMENT",                  "value": "production" },
+        { "name": "CLOUD_PROVIDER",               "value": "aws" },
+        { "name": "SERVICE_B_URL",                "value": "http://SERVICE_B_DNS:8001" },
+        { "name": "PROMETHEUS_PORT",              "value": "9090" }
+      ],
+      "secrets": [
+        { "name": "DATABASE_URL", "valueFrom": "arn:aws:ssm:us-east-1:ACCOUNT:parameter/otel-lab/db-url" }
+      ],
+      "dependsOn": [
+        { "containerName": "otel-collector", "condition": "HEALTHY" }
+      ],
+      "logConfiguration": {
+        "logDriver": "awslogs",
+        "options": {
+          "awslogs-group":         "/otel-lab/service-a",
+          "awslogs-region":        "us-east-1",
+          "awslogs-stream-prefix": "service-a"
+        }
+      },
+      "healthCheck": {
+        "command": ["CMD-SHELL", "curl -f http://localhost:8000/health || exit 1"],
+        "interval": 10,
+        "timeout":  5,
+        "retries":  5,
+        "startPeriod": 30
+      }
+    },
+
+    {
+      "name": "service-b",
+      "image": "ACCOUNT_ID.dkr.ecr.us-east-1.amazonaws.com/otel-lab/service-b:1.0.0",
+      "essential": true,
+      "cpu": 256,
+      "memory": 512,
+      "portMappings": [
+        { "containerPort": 8001, "protocol": "tcp", "name": "http"    },
+        { "containerPort": 9091, "protocol": "tcp", "name": "metrics" }
+      ],
+      "environment": [
+        { "name": "OTEL_EXPORTER_OTLP_ENDPOINT", "value": "http://localhost:4317" },
+        { "name": "ENVIRONMENT",                  "value": "production" },
+        { "name": "CLOUD_PROVIDER",               "value": "aws" },
+        { "name": "PROMETHEUS_PORT",              "value": "9091" }
+      ],
+      "secrets": [
+        { "name": "DATABASE_URL", "valueFrom": "arn:aws:ssm:us-east-1:ACCOUNT:parameter/otel-lab/db-url" }
+      ],
+      "dependsOn": [
+        { "containerName": "otel-collector", "condition": "HEALTHY" }
+      ],
+      "logConfiguration": {
+        "logDriver": "awslogs",
+        "options": {
+          "awslogs-group":         "/otel-lab/service-b",
+          "awslogs-region":        "us-east-1",
+          "awslogs-stream-prefix": "service-b"
+        }
+      }
+    }
+  ],
+
+  "volumes": [
+    {
+      "name": "otel-config",
+      "efsVolumeConfiguration": {
+        "fileSystemId": "fs-XXXX",
+        "rootDirectory": "/otel-collector"
+      }
+    }
+  ]
+}
