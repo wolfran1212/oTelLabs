@@ -1,0 +1,11 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "microservices.fullname" . }}-config
+  namespace: {{ .Release.Namespace }}
+data:
+  ENVIRONMENT: "{{ .Values.global.environment }}"
+  CLOUD_PROVIDER: "{{ .Values.global.cloudProvider }}"
+  OTEL_EXPORTER_OTLP_ENDPOINT: "{{ .Values.global.otelCollectorEndpoint }}"
+  SERVICE_B_URL: "http://service-b:{{ .Values.serviceB.service.port }}"
+  DATABASE_URL: "postgresql://{{ .Values.postgres.user }}:{{ .Values.postgres.password }}@postgres:{{ .Values.postgres.port }}/{{ .Values.postgres.database }}"

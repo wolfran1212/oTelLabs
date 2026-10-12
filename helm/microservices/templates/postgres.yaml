@@ -1,0 +1,93 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: postgres-init-script
+  namespace: {{ .Release.Namespace }}
+data:
+  init.sql: |
+    CREATE TABLE IF NOT EXISTS orders (
+        id VARCHAR(50) PRIMARY KEY,
+        product VARCHAR(100) NOT NULL,
+        quantity INTEGER NOT NULL,
+        status VARCHAR(50) NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS inventory (
+        product_id VARCHAR(100) PRIMARY KEY,
+        available INTEGER NOT NULL,
+        warehouse VARCHAR(100) NOT NULL,
+        last_updated TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+    );
+
+    INSERT INTO orders (id, product, quantity, status) VALUES
+        ('ord-001', 'LAPTOP-X1', 1, 'delivered'),
+        ('ord-002', 'MOUSE-PRO', 2, 'processing'),
+        ('ord-003', 'KEYBOARD-MK', 1, 'shipped'),
+        ('ord-004', 'MONITOR-4K', 1, 'delivered'),
+        ('ord-005', 'HEADSET-Z', 1, 'processing')
+    ON CONFLICT (id) DO NOTHING;
+
+    INSERT INTO inventory (product_id, available, warehouse) VALUES
+        ('LAPTOP-X1', 15, 'WH-BOGOTA'),
+        ('MOUSE-PRO', 150, 'WH-MEDELLIN'),
+        ('KEYBOARD-MK', 40, 'WH-CALI'),
+        ('MONITOR-4K', 8, 'WH-BOGOTA'),
+        ('HEADSET-Z', 25, 'WH-MEDELLIN')
+    ON CONFLICT (product_id) DO NOTHING;
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: postgres
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: postgres
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: postgres
+  template:
+    metadata:
+      labels:
+        app: postgres
+    spec:
+      containers:
+        - name: postgres
+          image: "{{ .Values.postgres.image }}"
+          env:
+            - name: POSTGRES_DB
+              value: "{{ .Values.postgres.database }}"
+            - name: POSTGRES_USER
+              value: "{{ .Values.postgres.user }}"
+            - name: POSTGRES_PASSWORD
+              value: "{{ .Values.postgres.password }}"
+          ports:
+            - containerPort: {{ .Values.postgres.port }}
+          resources:
+            {{- toYaml .Values.postgres.resources | nindent 12 }}
+          volumeMounts:
+            - name: init-script
+              mountPath: /docker-entrypoint-initdb.d/init.sql
+              subPath: init.sql
+      volumes:
+        - name: init-script
+          configMap:
+            name: postgres-init-script
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: postgres
+spec:
+  type: ClusterIP
+  ports:
+    - port: {{ .Values.postgres.port }}
+      targetPort: {{ .Values.postgres.port }}
+  selector:
+    app: postgres

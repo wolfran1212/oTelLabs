@@ -1,0 +1,55 @@
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: {{ include "otel-collector.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app.kubernetes.io/name: {{ include "otel-collector.name" . }}
+    app.kubernetes.io/instance: {{ .Release.Name }}
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ include "otel-collector.name" . }}
+      app.kubernetes.io/instance: {{ .Release.Name }}
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: {{ include "otel-collector.name" . }}
+        app.kubernetes.io/instance: {{ .Release.Name }}
+    spec:
+      serviceAccountName: {{ .Values.serviceAccount.name }}
+      containers:
+        - name: otel-collector
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["/otelcol-contrib"]
+          args: ["--config=/etc/otelcol/collector-config.yaml"]
+          env:
+            - name: ENVIRONMENT
+              value: "{{ .Values.environment.ENVIRONMENT }}"
+            - name: CLOUD_REGION
+              value: "{{ .Values.environment.CLOUD_REGION }}"
+            - name: GCP_PROJECT_ID
+              value: "{{ .Values.environment.GCP_PROJECT_ID }}"
+          ports:
+            - name: otlp-grpc
+              containerPort: {{ .Values.service.ports.otlpGrpc }}
+              protocol: TCP
+            - name: otlp-http
+              containerPort: {{ .Values.service.ports.otlpHttp }}
+              protocol: TCP
+            - name: metrics-prom
+              containerPort: {{ .Values.service.ports.metricsProm }}
+              protocol: TCP
+            - name: health
+              containerPort: {{ .Values.service.ports.health }}
+              protocol: TCP
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          volumeMounts:
+            - name: config-volume
+              mountPath: /etc/otelcol
+      volumes:
+        - name: config-volume
+          configMap:
+            name: {{ include "otel-collector.fullname" . }}-config

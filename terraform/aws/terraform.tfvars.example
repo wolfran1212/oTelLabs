@@ -1,0 +1,5 @@
+aws_region   = "us-east-1"
+environment  = "production"
+cluster_name = "otel-lab"
+app_cpu      = "1024"
+app_memory   = "2048"

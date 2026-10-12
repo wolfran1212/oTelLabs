@@ -1,0 +1,58 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: service-a
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: service-a
+spec:
+  replicas: {{ .Values.serviceA.replicaCount }}
+  selector:
+    matchLabels:
+      app: service-a
+  template:
+    metadata:
+      labels:
+        app: service-a
+    spec:
+      containers:
+        - name: service-a
+          image: "{{ .Values.serviceA.image.repository }}:{{ .Values.serviceA.image.tag }}"
+          imagePullPolicy: {{ .Values.serviceA.image.pullPolicy }}
+          ports:
+            - containerPort: {{ .Values.serviceA.service.port }}
+          envFrom:
+            - configMapRef:
+                name: {{ include "microservices.fullname" . }}-config
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: {{ .Values.serviceA.service.port }}
+            initialDelaySeconds: 10
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: {{ .Values.serviceA.service.port }}
+            initialDelaySeconds: 15
+            periodSeconds: 10
+          resources:
+            {{- toYaml .Values.serviceA.resources | nindent 12 }}
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: service-a
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: service-a
+spec:
+  type: {{ .Values.serviceA.service.type }}
+  ports:
+    - port: {{ .Values.serviceA.service.port }}
+      targetPort: {{ .Values.serviceA.service.port }}
+      protocol: TCP
+      name: http
+  selector:
+    app: service-a
