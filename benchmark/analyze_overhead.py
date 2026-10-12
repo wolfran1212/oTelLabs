@@ -14,6 +14,9 @@ import json
 import sys
 from pathlib import Path
 
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8")
+
 def load_results(path: str) -> dict:
     p = Path(path)
     if not p.exists():
@@ -55,7 +58,7 @@ def main():
         ("Latencia promedio (ms)",  "latency_avg_ms",  1,   "ms"),
         ("Latencia p95 (ms)",       "latency_p95_ms",  1,   "ms"),
         ("Latencia p99 (ms)",       "latency_p99_ms",  1,   "ms"),
-        ("Error rate (%)",          "error_rate_pct",  0.1, "%"),
+        ("Error rate (%)",          "error_rate_pct",  2,   "%"),
         ("Throughput (req/s)",      "throughput_rps",  1,   "rps"),
     ]
 
