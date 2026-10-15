@@ -143,13 +143,20 @@ exporters:
     send_timestamps: true
     metric_expiration: 3m
     resource_to_telemetry_conversion:
-      enabled: false   # Convierte resource attrs en labels de Prometheus
+      enabled: true    # service.name → label service_name (lo usan los filtros del dashboard)
 
   # ── OTLP hacia Prometheus remoto (GCP Managed Prometheus) ────────────────
   # prometheusremotewrite:
   #   endpoint: "https://monitoring.googleapis.com/v1/projects/${GCP_PROJECT}/location/global/prometheus/api/v1/write"
   #   auth:
   #     authenticator: googleauth
+
+  # ── Loki: logs OTLP nativos (Loki 3.x) → correlación log ↔ traza en Grafana ─
+  # trace_id/span_id se guardan como structured metadata del log
+  otlphttp/loki:
+    endpoint: http://loki:3100/otlp
+    tls:
+      insecure: true
 
   # ── Cloud Logging (GCP) ───────────────────────────────────────────────────
   googlecloud:
@@ -198,7 +205,10 @@ service:
 
     # ── Pipeline de MÉTRICAS ─────────────────────────────────────────────────
     metrics:
-      receivers: [otlp, prometheus, hostmetrics]
+      # Sin el receiver prometheus: las métricas internas del Collector (:8888) las
+      # scrapea Prometheus directo (job otel-collector-internal). Re-exportarlas por
+      # :8889 duplicaba labels (service_name) al activar resource_to_telemetry_conversion.
+      receivers: [otlp, hostmetrics]
       processors:
         - memory_limiter
         - resource
@@ -217,6 +227,7 @@ service:
         - resource
         - batch
       exporters:
+        - otlphttp/loki     # Loki → Grafana Explore
         - googlecloud       # Cloud Logging (GCP)
         # - awscloudwatchlogs # CloudWatch (AWS)
         - logging

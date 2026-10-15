@@ -1,0 +1,15 @@
+# ════════════════════════════════════════════════════════════════════════════
+# Override para docker compose (local): se combina con collector-config.yaml
+#   --config=collector-config.yaml --config=collector-config.local.yaml
+#
+# Al combinar configs, las listas se reemplazan completas: aquí se quita
+# googlecloud del pipeline de logs porque exige credenciales GCP (ADC).
+# Un exporter definido pero sin pipeline no se inicia.
+# En GKE se usa solo collector-config.yaml (Workload Identity da las credenciales).
+# ════════════════════════════════════════════════════════════════════════════
+service:
+  pipelines:
+    logs:
+      exporters:
+        - otlphttp/loki
+        - logging

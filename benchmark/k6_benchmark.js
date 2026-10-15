@@ -1,11 +1,19 @@
 /**
  * benchmark/k6_benchmark.js — Fase 4: Análisis de overhead OTel
  *
- * Ejecutar sin instrumentación (baseline):
- *   k6 run --env INSTRUMENTED=false --out csv=results_baseline.csv k6_benchmark.js
+ * IMPORTANTE: INSTRUMENTED solo etiqueta el archivo de resultados. Lo que
+ * realmente apaga OTel es levantar los servicios con OTEL_ENABLED=false:
  *
- * Ejecutar con instrumentación OTel:
- *   k6 run --env INSTRUMENTED=true --out csv=results_otel.csv k6_benchmark.js
+ * Baseline (sin instrumentación):
+ *   OTEL_ENABLED=false docker compose up -d service-a service-b
+ *   k6 run --env INSTRUMENTED=false benchmark/k6_benchmark.js
+ *
+ * Con instrumentación OTel:
+ *   docker compose up -d service-a service-b
+ *   k6 run --env INSTRUMENTED=true benchmark/k6_benchmark.js
+ *
+ * Pico de 200 VUs (opcional, NO usar para la comparación de overhead):
+ *   k6 run --env SPIKE=true ...
  *
  * Comparar resultados:
  *   python3 analyze_overhead.py
@@ -31,6 +39,19 @@ const successRate     = new Rate("success_rate");
 const dbLatency       = new Trend("db_latency_ms",   true);
 
 // ── Escenarios de carga ───────────────────────────────────────────────────────
+// El pico distorsiona el p99 (satura la DB), por eso queda fuera por defecto
+const SPIKE_SCENARIO = {
+  executor: "ramping-vus",
+  startVUs: 50,
+  stages: [
+    { duration: "15s", target: 200 },
+    { duration: "30s", target: 200 },
+    { duration: "15s", target: 50  },
+  ],
+  startTime: "6m10s",   // después de la carga sostenida
+  tags: { scenario: "spike" },
+};
+
 export const options = {
   scenarios: {
     // Escenario 1: Ramp-up gradual (warm-up)
@@ -46,27 +67,18 @@ export const options = {
     },
 
     // Escenario 2: Carga sostenida (medición principal)
+    // 75 VUs × 5 min: carga realista recomendada por el lab (50–100 VUs, 5 min)
     sustained_load: {
       executor: "constant-vus",
-      vus: 50,
-      duration: "3m",
+      vus: 75,
+      duration: "5m",
       startTime: "1m",   // Después del warmup
       gracefulStop: "10s",
       tags: { scenario: "sustained" },
     },
 
-    // Escenario 3: Pico de carga (stress test)
-    spike: {
-      executor: "ramping-vus",
-      startVUs: 50,
-      stages: [
-        { duration: "15s", target: 200 },
-        { duration: "30s", target: 200 },
-        { duration: "15s", target: 50  },
-      ],
-      startTime: "5m",
-      tags: { scenario: "spike" },
-    },
+    // Escenario 3 (opcional): pico de 200 VUs — stress test
+    ...(__ENV.SPIKE === "true" ? { spike: SPIKE_SCENARIO } : {}),
   },
 
   thresholds: {

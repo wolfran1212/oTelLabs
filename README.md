@@ -425,36 +425,27 @@ Un burn rate > 14.4 en ventana de 1h debe disparar una alerta PAGE (Clase 2).
 
 ### Método de medición
 
-El overhead de OTel se mide comparando dos ejecuciones idénticas del mismo código:
-- **Baseline**: sin `FastAPIInstrumentor`, sin `BatchSpanProcessor`, sin `/metrics`
-- **Con OTel**: configuración completa del laboratorio
+El overhead de OTel se mide comparando dos ejecuciones idénticas del mismo código,
+cambiando solo la variable `OTEL_ENABLED` de los servicios:
+- **Baseline** (`OTEL_ENABLED=false`): no se registran providers ni instrumentors; la API de OTel queda en no-op. Los logs JSON a stdout se mantienen en ambos modos.
+- **Con OTel** (`OTEL_ENABLED=true`, default): trazas, métricas y logs exportados por OTLP al Collector.
+
+> Detener solo el Collector **no** es un baseline válido: el SDK sigue creando spans y reintentando exportarlos.
+
+Carga: warm-up de 1 min (10 VUs) + **75 VUs constantes durante 5 min**. El pico de 200 VUs es opcional (`--env SPIKE=true`) y no se usa en la comparación porque satura la DB y domina el p99.
 
 ```bash
-# Paso 1: Levantar el stack local
-docker compose up -d
-docker compose ps  # Verificar que todos los servicios están healthy
+# Paso 1 — BASELINE (terminal 1: k6 · terminal 2: CPU/memoria)
+OTEL_ENABLED=false docker compose up -d service-a service-b
+k6 run --env INSTRUMENTED=false benchmark/k6_benchmark.js
+python3 benchmark/collect_stats.py baseline        # en paralelo, iniciar junto con k6
 
-# Paso 2: Benchmark BASELINE (sin instrumentación)
-# Primero, detener el OTel Collector para simular el baseline:
-docker compose stop otel-collector
+# Paso 2 — CON OTel
+docker compose up -d service-a service-b
+k6 run --env INSTRUMENTED=true benchmark/k6_benchmark.js
+python3 benchmark/collect_stats.py otel            # en paralelo
 
-k6 run \
-  --env INSTRUMENTED=false \
-  --env BASE_URL=http://localhost:8000 \
-  --out csv=results_baseline.csv \
-  benchmark/k6_benchmark.js
-
-# Paso 3: Levantar el Collector y ejecutar CON OTel
-docker compose start otel-collector
-sleep 10  # Esperar a que el Collector esté healthy
-
-k6 run \
-  --env INSTRUMENTED=true \
-  --env BASE_URL=http://localhost:8000 \
-  --out csv=results_otel.csv \
-  benchmark/k6_benchmark.js
-
-# Paso 4: Analizar diferencias
+# Paso 3 — Tabla comparativa (lee results_*.json y stats_*.json)
 python3 benchmark/analyze_overhead.py
 ```
 
@@ -477,6 +468,25 @@ python3 benchmark/analyze_overhead.py
 - Memoria: ~150-300 MB dependiendo del volumen de telemetría y tamaño del batch
 
 **Veredicto de referencia industria**: un overhead de p99 < 10ms es considerado aceptable para la mayoría de servicios según la documentación de OpenTelemetry y estudios de Datadog (2024). El valor adicional de la observabilidad (reducción de MTTD de horas a minutos) supera ampliamente este costo.
+
+---
+
+## Correcciones posteriores a la primera toma de evidencias
+
+| Problema detectado | Corrección |
+|---|---|
+| `FastAPIInstrumentor().instrument()` no tenía efecto: `FastAPI` se importaba antes de parchear la clase. Con las versiones actuales de las dependencias, las trazas quedaban partidas (sin span SERVER, service-b desconectado) | `FastAPIInstrumentor.instrument_app(app)` sobre la instancia |
+| El baseline del benchmark no desactivaba el SDK (solo se detenía el Collector) | Flag `OTEL_ENABLED` en ambos servicios |
+| Sin datos de respaldo para CPU y memoria | `benchmark/collect_stats.py` → `stats_*.json`, integrado en `analyze_overhead.py` |
+| `http_requests_total` se contaba 2–3 veces por request; los 4xx/5xx propios no se contaban | Un único `add()` por request en el `finally`, con la clase de status real |
+| `except httpx.HTTPStatusError` usaba `e.status_code` (inexistente) → 500 | `e.response.status_code` |
+| Histogramas en segundos con buckets default (pensados para ms): p99 ≈ 4.95 s fijo | `explicit_bucket_boundaries_advisory` en segundos |
+| Los logs no salían por OTLP; no había backend de logs para Grafana Explore | `LoggerProvider` + `OTLPLogExporter`, Loki 3 en compose, datasource con link `trace_id` → Jaeger |
+| Sin label `service_name` en Prometheus (variable `$service` del dashboard vacía) | `resource_to_telemetry_conversion: true` |
+| `--workers 2` exportaba dos procesos con la misma identidad → contadores pisados | `service.instance.id` por proceso |
+| Panel de CPU graficaba el CPU de Jaeger; nombres de métricas del Collector incorrectos | Métricas `process.cpu.time` (system-metrics) y queries corregidas |
+| Error Rate y Burn Rate mostraban "No data" sin errores 5xx | Queries devuelven 0 |
+| `googlecloud` exporter impedía iniciar el Collector local sin credenciales GCP | `collector-config.local.yaml` (override solo para compose) |
 
 ---
 
@@ -511,8 +521,9 @@ curl "http://localhost:8000/order/ord-003"
 # 7. Ver el dashboard en Grafana
 # Abrir http://localhost:3000 → Dashboards → OTel Lab
 
-# 8. Ver logs con trace_id correlacionados
-docker compose logs service-a | grep trace_id | head -5
+# 8. Ver logs con trace_id correlacionados (Grafana → Explore → Loki)
+#    {service_name="service-a"} | trace_id="<trace_id>"
+#    El campo trace_id de cada log es un link a la traza en Jaeger
 ```
 
 ---

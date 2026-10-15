@@ -1,11 +1,11 @@
 {
   "mode": "baseline",
-  "timestamp": "2026-10-12T01:20:42.697Z",
+  "timestamp": "2026-10-15T01:52:33.318Z",
   "metrics": {
-    "latency_avg_ms": 942.1144548887715,
-    "latency_p95_ms": 2910.2894949999995,
-    "latency_p99_ms": 3165.859591999999,
+    "latency_avg_ms": 564.1338729570283,
+    "latency_p95_ms": 804.83825,
+    "latency_p99_ms": 834.40735,
     "error_rate_pct": 0,
-    "throughput_rps": 41.61224038390957
+    "throughput_rps": 69.51825586228156
   }
 }

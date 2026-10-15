@@ -50,9 +50,10 @@ services:
   otel-collector:
     image: otel/opentelemetry-collector-contrib:0.103.0
     container_name: otel-collector
-    command: [ "--config=/etc/otel/collector-config.yaml" ]
+    command: [ "--config=/etc/otel/collector-config.yaml", "--config=/etc/otel/collector-config.local.yaml" ]
     volumes:
       - ./otel-collector/collector-config.yaml:/etc/otel/collector-config.yaml:ro
+      - ./otel-collector/collector-config.local.yaml:/etc/otel/collector-config.local.yaml:ro
       # - //c/Users/Equipo/AppData/Roaming/gcloud/application_default_credentials.json:/etc/gcloud/adc.json:ro
     ports:
       - "4317:4317" # OTLP gRPC
@@ -71,6 +72,8 @@ services:
     depends_on:
       jaeger:
         condition: service_healthy
+      loki:
+        condition: service_started
     healthcheck:
       test: [ "CMD", "/otelcol-contrib", "--version" ]
       interval: 10s
@@ -140,6 +143,17 @@ services:
     depends_on:
       - prometheus
       - jaeger
+      - loki
+
+  # ── Loki (backend de logs, recibe OTLP desde el Collector) ───────────────
+  loki:
+    image: grafana/loki:3.1.0
+    container_name: loki
+    command: [ "-config.file=/etc/loki/local-config.yaml" ]
+    ports:
+      - "3100:3100"
+    networks:
+      - otel-net
 
   # ── Tempo (alternativa de trazas para Grafana stack) ──────────────────────
   tempo:
@@ -166,6 +180,7 @@ services:
       DATABASE_URL: postgresql://app:secret@postgres:5432/appdb
       PROMETHEUS_PORT: "9064"
       ENVIRONMENT: development
+      OTEL_ENABLED: ${OTEL_ENABLED:-true}   # false → baseline del benchmark
       CLOUD_PROVIDER: local
     ports:
       - "8000:8000" # FastAPI
@@ -178,7 +193,8 @@ services:
       otel-collector:
         condition: service_healthy
     healthcheck:
-      test: [ "CMD-SHELL", "curl -f http://localhost:8000/health || exit 1" ]
+      # python:slim no trae curl → healthcheck con la stdlib
+      test: [ "CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')" ]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -194,6 +210,7 @@ services:
       DATABASE_URL: postgresql://app:secret@postgres:5432/appdb
       PROMETHEUS_PORT: "9065"
       ENVIRONMENT: development
+      OTEL_ENABLED: ${OTEL_ENABLED:-true}   # false → baseline del benchmark
       CLOUD_PROVIDER: local
     ports:
       - "8001:8001" # FastAPI
@@ -206,7 +223,8 @@ services:
       otel-collector:
         condition: service_healthy
     healthcheck:
-      test: [ "CMD-SHELL", "curl -f http://localhost:8001/health || exit 1" ]
+      # python:slim no trae curl → healthcheck con la stdlib
+      test: [ "CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8001/health')" ]
       interval: 10s
       timeout: 5s
       retries: 5

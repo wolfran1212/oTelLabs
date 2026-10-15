@@ -24,10 +24,15 @@ from opentelemetry.sdk.metrics.export import PeriodicExportingMetricReader
 from opentelemetry.sdk.resources import Resource, SERVICE_NAME, SERVICE_VERSION
 from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import OTLPSpanExporter
 from opentelemetry.exporter.otlp.proto.grpc.metric_exporter import OTLPMetricExporter
+from opentelemetry.exporter.otlp.proto.grpc._log_exporter import OTLPLogExporter
+from opentelemetry._logs import set_logger_provider
+from opentelemetry.sdk._logs import LoggerProvider, LoggingHandler
+from opentelemetry.sdk._logs.export import BatchLogRecordProcessor
 from opentelemetry.exporter.prometheus import PrometheusMetricReader
 from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
 from opentelemetry.instrumentation.httpx import HTTPXClientInstrumentor
 from opentelemetry.instrumentation.psycopg2 import Psycopg2Instrumentor
+from opentelemetry.instrumentation.system_metrics import SystemMetricsInstrumentor
 from opentelemetry.propagate import inject
 
 # ── Configuración desde variables de entorno ─────────────────────────────────
@@ -37,6 +42,10 @@ DB_DSN          = os.getenv("DATABASE_URL", "postgresql://app:secret@postgres:54
 PROMETHEUS_PORT = int(os.getenv("PROMETHEUS_PORT", "9090"))
 ENV             = os.getenv("ENVIRONMENT", "production")
 APP_VERSION     = os.getenv("APP_VERSION", "1.0.0")
+# OTEL_ENABLED=false → baseline del benchmark: no se registra ningún provider ni
+# instrumentor. La API de OTel cae en sus implementaciones no-op, así el código de
+# negocio queda idéntico y solo cambia el costo de la telemetría.
+OTEL_ENABLED    = os.getenv("OTEL_ENABLED", "true").lower() != "false"
 
 # ── 1. Resource: identidad del servicio en toda la telemetría ─────────────────
 # El Resource viaja en cada señal (traza, métrica, log) para identificar el origen.
@@ -45,29 +54,44 @@ resource = Resource.create({
     SERVICE_VERSION: APP_VERSION,
     "deployment.environment": ENV,
     "cloud.provider": os.getenv("CLOUD_PROVIDER", "gcp"),
+    # uvicorn corre con --workers 2: cada proceso necesita su propia identidad,
+    # si no, sus contadores acumulados se pisan en el Collector/Prometheus
+    "service.instance.id": f"{os.getenv('HOSTNAME', 'local')}-{os.getpid()}",
     "host.name":     os.getenv("HOSTNAME", "local"),
 })
 
 # ── 2. TracerProvider + OTLP exporter (gRPC → OTel Collector) ────────────────
-tracer_provider = TracerProvider(resource=resource)
-otlp_span_exporter = OTLPSpanExporter(endpoint=OTEL_ENDPOINT, insecure=True)
-# BatchSpanProcessor: agrupa spans antes de enviar → reduce overhead de red
-tracer_provider.add_span_processor(BatchSpanProcessor(otlp_span_exporter))
-trace.set_tracer_provider(tracer_provider)
-tracer = trace.get_tracer("service-a", APP_VERSION)
+# ── 3. MeterProvider + OTLP push cada 15s hacia el Collector ──────────────────
+# ── 3b. LoggerProvider + OTLP: los logs viajan al Collector (→ Loki / Cloud Logging)
+tracer_provider = meter_provider = logger_provider = None
+if OTEL_ENABLED:
+    tracer_provider = TracerProvider(resource=resource)
+    # BatchSpanProcessor: agrupa spans antes de enviar → reduce overhead de red
+    tracer_provider.add_span_processor(
+        BatchSpanProcessor(OTLPSpanExporter(endpoint=OTEL_ENDPOINT, insecure=True))
+    )
+    trace.set_tracer_provider(tracer_provider)
 
-# ── 3. MeterProvider + Prometheus reader (scraping en :9090/metrics) ──────────
-# PrometheusMetricReader expone las métricas OTel en formato Prometheus
-otlp_metric_exporter = OTLPMetricExporter(endpoint=OTEL_ENDPOINT, insecure=True)
-otlp_metric_reader = PeriodicExportingMetricReader(otlp_metric_exporter, export_interval_millis=15000)
-meter_provider = MeterProvider(
-    resource=resource,
-    metric_readers=[ otlp_metric_reader]
-)
-metrics.set_meter_provider(meter_provider)
+    otlp_metric_reader = PeriodicExportingMetricReader(
+        OTLPMetricExporter(endpoint=OTEL_ENDPOINT, insecure=True),
+        export_interval_millis=15000,
+    )
+    meter_provider = MeterProvider(resource=resource, metric_readers=[otlp_metric_reader])
+    metrics.set_meter_provider(meter_provider)
+
+    logger_provider = LoggerProvider(resource=resource)
+    logger_provider.add_log_record_processor(
+        BatchLogRecordProcessor(OTLPLogExporter(endpoint=OTEL_ENDPOINT, insecure=True))
+    )
+    set_logger_provider(logger_provider)
+
+tracer = trace.get_tracer("service-a", APP_VERSION)
 meter = metrics.get_meter("service-a", APP_VERSION)
 
 # ── 4. Instrumentos de métricas (SLIs) ───────────────────────────────────────
+# Buckets en SEGUNDOS: los default del SDK (0, 5, 10, 25… pensados para ms)
+# meten todo en el primer bucket y el p99 sale ~4.95s sin importar la latencia real
+LATENCY_BUCKETS_S = [0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10]
 http_requests_total = meter.create_counter(
     "http_requests_total",
     description="Total HTTP requests recibidos por service-a",
@@ -77,11 +101,13 @@ http_request_duration = meter.create_histogram(
     "http_request_duration_seconds",
     description="Distribución de latencia de requests HTTP (p50/p95/p99)",
     unit="s",
+    explicit_bucket_boundaries_advisory=LATENCY_BUCKETS_S,
 )
 db_query_duration = meter.create_histogram(
     "db_query_duration_seconds",
     description="Latencia de queries a PostgreSQL",
     unit="s",
+    explicit_bucket_boundaries_advisory=LATENCY_BUCKETS_S,
 )
 service_b_calls_total = meter.create_counter(
     "service_b_calls_total",
@@ -111,16 +137,25 @@ class OtelJsonFormatter(jsonlogger.JsonFormatter):
 
 handler = logging.StreamHandler()
 handler.setFormatter(OtelJsonFormatter("%(asctime)s %(levelname)s %(name)s %(message)s"))
-logging.basicConfig(level=logging.INFO, handlers=[handler])
+handlers = [handler]
+if OTEL_ENABLED:
+    # LoggingHandler adjunta trace_id/span_id del span activo a cada LogRecord OTLP
+    handlers.append(LoggingHandler(level=logging.INFO, logger_provider=logger_provider))
+logging.basicConfig(level=logging.INFO, handlers=handlers)
 logger = logging.getLogger("service-a")
 
 # ── 6. Auto-instrumentación de librerías ─────────────────────────────────────
-# FastAPIInstrumentor crea spans automáticos para cada endpoint HTTP
+# FastAPIInstrumentor: ver instrument_app() más abajo, junto a la creación de la app
 # HTTPXClientInstrumentor propaga el W3C TraceContext hacia service-b
 # Psycopg2Instrumentor crea spans para cada query SQL
-FastAPIInstrumentor().instrument(tracer_provider=tracer_provider)
-HTTPXClientInstrumentor().instrument(tracer_provider=tracer_provider)
-Psycopg2Instrumentor().instrument(tracer_provider=tracer_provider)
+if OTEL_ENABLED:
+    HTTPXClientInstrumentor().instrument(tracer_provider=tracer_provider)
+    Psycopg2Instrumentor().instrument(tracer_provider=tracer_provider)
+    # CPU y memoria del proceso → panel "CPU Overhead" del dashboard
+    SystemMetricsInstrumentor(config={
+        "process.cpu.time": ["user", "system"],
+        "process.memory.usage": None,
+    }).instrument(meter_provider=meter_provider)
 
 # ── Conexión DB ───────────────────────────────────────────────────────────────
 def get_db_connection():
@@ -131,11 +166,12 @@ def get_db_connection():
 async def lifespan(app: FastAPI):
     # No se necesita iniciar porque ya PrometheusmETRIC EN LINA 56 ya lo hizo en el serv
     # start_http_server(PROMETHEUS_PORT)
-    logger.info("Prometheus metrics server started", extra={"port": PROMETHEUS_PORT})
+    logger.info("service-a started", extra={"otel_enabled": OTEL_ENABLED})
     yield
-    # Shutdown: flushar todos los spans pendientes
-    tracer_provider.shutdown()
-    meter_provider.shutdown()
+    # Shutdown: flushar spans, métricas y logs pendientes
+    for provider in (tracer_provider, meter_provider, logger_provider):
+        if provider:
+            provider.shutdown()
 
 app = FastAPI(
     title="Service A",
@@ -143,6 +179,12 @@ app = FastAPI(
     version=APP_VERSION,
     lifespan=lifespan,
 )
+
+# instrument_app sobre la instancia: crea el span SERVER de cada request y extrae
+# el header traceparent (W3C). FastAPIInstrumentor().instrument() parchea la clase
+# en el módulo fastapi, pero aquí FastAPI ya se importó arriba → no tenía efecto.
+if OTEL_ENABLED:
+    FastAPIInstrumentor.instrument_app(app, tracer_provider=tracer_provider, excluded_urls="health")
 
 # ── Endpoints ─────────────────────────────────────────────────────────────────
 
@@ -162,8 +204,9 @@ async def get_order(order_id: str, request: Request):
     """
     start = time.time()
     labels = {"endpoint": "/order", "method": "GET"}
+    # status_class se fija según el resultado; se cuenta UNA sola vez en el finally
+    status_class = "5xx"
     active_requests.add(1, labels)
-    http_requests_total.add(1, labels)
 
     try:
         # ── Custom span: lógica de negocio DB ────────────────────────────────
@@ -241,19 +284,15 @@ async def get_order(order_id: str, request: Request):
                 sb_span.set_attribute("inventory.available", inventory.get("available", 0))
                 logger.info("Inventory fetched from service-b",
                             extra={"product": order_data["product"], "available": inventory.get("available")})
-                status_labels = {**labels, "status": "2xx"} 
+                status_class = "2xx"
             except httpx.HTTPStatusError as e:
                 service_b_calls_total.add(1, {"status": "error"})
                 sb_span.record_exception(e)
                 sb_span.set_status(trace.StatusCode.ERROR, str(e))
-                status_labels = {**labels, "status": f"{e.status_code // 100}xx"}
-                http_requests_total.add(1, status_labels)
+                # Respuesta degradada: se contabiliza con la clase de status de service-b
+                status_class = f"{e.response.status_code // 100}xx"
                 logger.error("service-b call failed", extra={"error": str(e)})
                 inventory = {"available": -1, "error": "service-b unavailable"}
-
-        total_duration = time.time() - start
-        http_requests_total.add(1, status_labels)
-        http_request_duration.record(total_duration, labels)
 
         return {
             "order":     order_data,
@@ -261,7 +300,12 @@ async def get_order(order_id: str, request: Request):
             "trace_id":  format(trace.get_current_span().get_span_context().trace_id, "032x"),
         }
 
+    except HTTPException as e:
+        status_class = f"{e.status_code // 100}xx"
+        raise
     finally:
+        http_requests_total.add(1, {**labels, "status": status_class})
+        http_request_duration.record(time.time() - start, labels)
         active_requests.add(-1, labels)
 
 

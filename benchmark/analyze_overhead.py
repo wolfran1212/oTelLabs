@@ -3,9 +3,13 @@
 analyze_overhead.py — Análisis comparativo de overhead OTel (Fase 4)
 
 Uso:
-    # 1. Ejecutar benchmarks:
-    #    k6 run --env INSTRUMENTED=false k6_benchmark.js  → genera results_baseline.json
-    #    k6 run --env INSTRUMENTED=true  k6_benchmark.js  → genera results_otel.json
+    # 1. Ejecutar benchmarks (ver encabezado de k6_benchmark.js):
+    #    OTEL_ENABLED=false docker compose up -d service-a service-b
+    #    k6 run --env INSTRUMENTED=false k6_benchmark.js  → results_baseline.json
+    #    python3 collect_stats.py baseline (en paralelo)   → stats_baseline.json
+    #    docker compose up -d service-a service-b
+    #    k6 run --env INSTRUMENTED=true  k6_benchmark.js  → results_otel.json
+    #    python3 collect_stats.py otel (en paralelo)       → stats_otel.json
     # 2. Analizar:
     python3 analyze_overhead.py
 """
@@ -44,6 +48,12 @@ def main():
     b = baseline.get("metrics", {})
     o = otel.get("metrics", {})
 
+    # CPU / memoria (opcional): stats_*.json de collect_stats.py
+    b_stats = load_results("stats_baseline.json").get("apps", {})
+    o_stats = load_results("stats_otel.json").get("apps", {})
+    b.update(b_stats)
+    o.update(o_stats)
+
     print("\n" + "═" * 72)
     print("  ANÁLISIS DE OVERHEAD — OpenTelemetry SDK (Fase 4 del Lab)")
     print("═" * 72)
@@ -61,6 +71,11 @@ def main():
         ("Error rate (%)",          "error_rate_pct",  2,   "%"),
         ("Throughput (req/s)",      "throughput_rps",  1,   "rps"),
     ]
+    if b_stats and o_stats:
+        metrics += [
+            ("CPU apps (%)",            "cpu_avg_pct",     1,   "%"),
+            ("Memoria apps (MiB)",      "mem_avg_mib",     1,   "MiB"),
+        ]
 
     for label, key, precision, unit in metrics:
         b_val = b.get(key, 0)
@@ -91,16 +106,17 @@ def main():
         print("     ¿Exporters configurados correctamente?")
 
     print("\n  Tabla para el reporte del laboratorio:")
-    print("  ┌──────────────────────────┬────────────┬────────────┬──────────┐")
-    print("  │ Métrica                  │ Sin OTel   │ Con OTel   │ Overhead │")
-    print("  ├──────────────────────────┼────────────┼────────────┼──────────┤")
+    print("  ┌──────────────────────────┬──────────────┬──────────────┬──────────┐")
+    print("  │ Métrica                  │ Sin OTel     │ Con OTel     │ Overhead │")
+    print("  ├──────────────────────────┼──────────────┼──────────────┼──────────┤")
     for label, key, precision, unit in metrics:
         b_val = b.get(key, 0)
         o_val = o.get(key, 0)
-        diff  = ((o_val - b_val) / b_val * 100) if b_val else 0
-        sign  = "+" if diff > 0 else ""
-        print(f"  │ {label:<24} │ {b_val:>8.{precision}f} {unit} │ {o_val:>8.{precision}f} {unit} │ {sign}{diff:>5.1f}%  │")
-    print("  └──────────────────────────┴────────────┴────────────┴──────────┘")
+        diff  = f"{(o_val - b_val) / b_val * 100:+.1f}%" if b_val else "—"
+        b_txt = f"{b_val:.{precision}f} {unit}"
+        o_txt = f"{o_val:.{precision}f} {unit}"
+        print(f"  │ {label:<24} │ {b_txt:>12} │ {o_txt:>12} │ {diff:>8} │")
+    print("  └──────────────────────────┴──────────────┴──────────────┴──────────┘")
     print()
 
 if __name__ == "__main__":

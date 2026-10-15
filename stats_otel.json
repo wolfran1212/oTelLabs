@@ -1,0 +1,29 @@
+{
+  "mode": "otel",
+  "timestamp": "2026-10-15T02:24:27.932637+00:00",
+  "samples": 149,
+  "apps": {
+    "cpu_avg_pct": 168.05832214765098,
+    "mem_avg_mib": 318.0328859060403
+  },
+  "containers": {
+    "service-a": {
+      "cpu_avg_pct": 160.65959731543623,
+      "cpu_max_pct": 171.21,
+      "mem_avg_mib": 196.17382550335572,
+      "mem_max_mib": 209.6
+    },
+    "service-b": {
+      "cpu_avg_pct": 7.398724832214765,
+      "cpu_max_pct": 16.93,
+      "mem_avg_mib": 121.85906040268456,
+      "mem_max_mib": 131.5
+    },
+    "otel-collector": {
+      "cpu_avg_pct": 2.847315436241611,
+      "cpu_max_pct": 14.62,
+      "mem_avg_mib": 107.78724832214765,
+      "mem_max_mib": 112.3
+    }
+  }
+}
